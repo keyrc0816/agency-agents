@@ -1,63 +1,91 @@
-# 🇨🇳 Chinese (zh-CN) Localization
+# Agent localization
 
-Localize agent `name` and `description` fields in YAML frontmatter to Simplified Chinese. This makes agent names readable in Copilot Chat's agent picker for Chinese-speaking users.
+Localization is display metadata only. Canonical Agent names, descriptions,
+filenames, slugs, capabilities, tools, permissions, and prompt bodies remain
+authoritative in the English Agent Markdown.
 
-## Files
+## Existing zh-CN Copilot localization
 
-| File | Description |
-|------|-------------|
-| `agent-names-zh.json` | Mapping of English agent names → Chinese translations (130+ entries) |
-| `localize-agents-zh.ps1` | PowerShell script that reads the JSON and updates installed agent files |
+The existing Copilot workflow remains available and unchanged:
 
-## Usage
+| File | Purpose |
+|------|---------|
+| `agent-names-zh.json` | English Agent name to Simplified Chinese metadata mapping |
+| `localize-agents-zh.ps1` | Updates installed Copilot Agent copies under the selected target directories |
 
-After installing agents with `install.sh --tool copilot`:
+After installing Agents with `install.sh --tool copilot`, run:
 
 ```powershell
-# Localize agent names to Chinese
 powershell -ExecutionPolicy Bypass -File scripts/i18n/localize-agents-zh.ps1
 ```
 
-By default, the script processes:
-- `%USERPROFILE%\.github\agents\`
-- `%USERPROFILE%\.copilot\agents\`
-
-Pass custom paths if needed:
+By default the script processes `%USERPROFILE%\.github\agents\` and
+`%USERPROFILE%\.copilot\agents\`. To select another installed-copy location:
 
 ```powershell
 powershell -File scripts/i18n/localize-agents-zh.ps1 -TargetDirs @("C:\custom\path\agents")
 ```
 
-## How It Works
+This legacy workflow modifies installed Copilot copies only. It does not modify
+the canonical Agent Markdown. Re-run it after an install that overwrites those
+copies with canonical English metadata.
 
-1. Reads `agent-names-zh.json` (UTF-8 encoded) for the translation map
-2. For each `.md` file in the target directories:
-   - Extracts the `name:` field from YAML frontmatter
-   - Looks up the Chinese translation
-   - Replaces `name:` and `description:` fields
-   - Writes back as UTF-8
+## New zh-TW metadata localization
 
-## Result
+`agent-metadata-zh-TW.json` is the Taiwan Traditional Chinese display layer for
+the canonical English catalog. Schema v1 keys `agents` by canonical source
+filename stem. Each row contains:
 
-Before:
-```yaml
----
-name: Security Engineer
-description: Threat modeling, secure code review, security architecture
----
+- the canonical `sourceName`;
+- a `sourceDescriptionSha256` freshness guard;
+- localized display-only `name` and `description` fields.
+
+The description guard is lowercase SHA-256 of the UTF-8 canonical description
+after parsing its YAML scalar. Folded continuation lines are joined with one
+ASCII space, and surrounding YAML quotes are excluded.
+
+`source-association.json` records the controlled source repository, approved
+baseline, durable default ref, resource path, and authoritative resource hash.
+The App mirror must remain byte-identical to both source files.
+
+## Codex zh-TW usage
+
+Canonical English conversion remains the default:
+
+```bash
+./scripts/convert.sh --tool codex
+./scripts/convert.sh --tool codex --locale en
 ```
 
-After:
-```yaml
----
-name: 安全工程师
-description: 威胁建模、安全代码审查与应用安全架构专家
----
+To render bilingual human-readable Codex metadata:
+
+```bash
+./scripts/convert.sh --tool codex --locale zh-TW
 ```
 
-## Notes
+The zh-TW render changes only the TOML `name` and `description` display values.
+The canonical English name is retained, `developer_instructions` remains the
+canonical body, and the generated filename is still derived before localization.
 
-- Only modifies **installed copies** (in `~/.github/agents/`), not source files
-- Re-run after each `install.sh` update (which overwrites with English originals)
-- JSON file is the single source of truth for translations — add new agents there
-- Script is pure ASCII (avoids PowerShell encoding issues); all Chinese text lives in the JSON
+## Validation and governance
+
+Run:
+
+```bash
+python3 scripts/validate-localization.py
+./scripts/test-convert-frontmatter.sh
+```
+
+The validator is standard-library only and never mutates canonical sources. It
+checks schema and locale, missing/stale/orphan mappings, empty or malformed
+fields, duplicate JSON keys and localized names, high-confidence Simplified
+Chinese characters, canonical description guards, source association, and the
+authoritative resource SHA-256.
+
+For cross-repository parity, CI first looks for a counterpart branch with the
+same PR/head branch name. If none exists, it falls back to the durable `main`
+ref recorded by `sourceDefaultRef`. This allows feature development without a
+permanent feature-branch dependency. After the source localization changes are
+committed, update the association metadata when governance requires a new
+approved baseline or content hash; never substitute a mutable display name for
+the resource SHA-256.
