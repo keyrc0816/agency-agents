@@ -21,6 +21,10 @@ on:
       - "support/**"
       - "spatial-computing/**"
       - "specialized/**"
+      - "scripts/convert.sh"
+      - "scripts/test-convert-frontmatter.sh"
+      - "scripts/validate-localization.py"
+      - "scripts/i18n/**"
 
 jobs:
   lint:
@@ -65,3 +69,36 @@ jobs:
         run: |
           chmod +x scripts/check-agent-originality.sh
           ./scripts/check-agent-originality.sh $CHANGED_FILES
+
+      - name: Validate zh-TW localization coverage and guards
+        run: python3 scripts/validate-localization.py
+
+      - name: Test conversion and Codex localization invariants
+        run: |
+          chmod +x scripts/test-convert-frontmatter.sh
+          ./scripts/test-convert-frontmatter.sh
+
+      - name: Resolve durable App parity ref
+        id: app-ref
+        env:
+          CANDIDATE_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads \
+            https://github.com/keyrc0816/agency-agents-app.git \
+            "refs/heads/${CANDIDATE_REF}" >/dev/null 2>&1; then
+            echo "ref=${CANDIDATE_REF}" >> "$GITHUB_OUTPUT"
+            echo "Using matching App branch: ${CANDIDATE_REF}"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "Matching App branch unavailable; using durable main ref."
+          fi
+
+      - name: Checkout App parity gate
+        uses: actions/checkout@v4
+        with:
+          repository: keyrc0816/agency-agents-app
+          ref: ${{ steps.app-ref.outputs.ref }}
+          path: .parity-app
+
+      - name: Require byte-identical App bundled mirror
+        run: python3 .parity-app/tools/localization/check-parity.py --app-root .parity-app --source-root .
