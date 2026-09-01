@@ -7,7 +7,7 @@
 # integration files after adding or modifying agents.
 #
 # Usage:
-#   ./scripts/convert.sh [--tool <name>] [--out <dir>] [--parallel] [--jobs N] [--help]
+#   ./scripts/convert.sh [--tool <name>] [--locale <en|zh-TW>] [--out <dir>] [--parallel] [--jobs N] [--help]
 #
 # Tools:
 #   antigravity  — Antigravity skill files (~/.gemini/config/skills/)
@@ -31,6 +31,7 @@
 #
 #   --parallel       When tool is 'all', run independent tools in parallel (output order may vary).
 #   --jobs N         Max parallel jobs when using --parallel (default: nproc or 4).
+#   --locale LOCALE  Codex display metadata locale: en (default) or zh-TW.
 
 set -euo pipefail
 
@@ -65,6 +66,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="$REPO_ROOT/integrations"
 TODAY="$(date +%Y-%m-%d)"
+LOCALE="en"
+LOCALIZATION_INDEX=""
 
 # Shared helpers (get_field, get_body, slugify, ...)
 # shellcheck source=lib.sh
@@ -170,12 +173,23 @@ HEREDOC
 
 convert_codex() {
   local file="$1"
-  local name description slug outfile body
+  local name description slug source_slug outfile body canonical_name localized_name localized_description indexed_slug
 
   name="$(get_field "name" "$file")"
   description="$(get_field "description" "$file")"
+  # Identity is derived from canonical English before display localization.
   slug="$(slugify "$name")"
+  source_slug="$(basename "$file" .md)"
   body="$(get_body "$file")"
+
+  if [[ "$LOCALE" == "zh-TW" ]]; then
+    IFS=$'\t' read -r indexed_slug canonical_name description localized_name localized_description \
+      < <(awk -F '\t' -v slug="$source_slug" '$1 == slug { print; exit }' "$LOCALIZATION_INDEX")
+    if [[ "$indexed_slug" == "$source_slug" && -n "$localized_name" && -n "$localized_description" ]]; then
+      name="${canonical_name}｜${localized_name}"
+      description="${description}"$'\n\n中文：\n'"${localized_description}"
+    fi
+  fi
 
   outfile="$OUT_DIR/codex/agents/${slug}.toml"
   mkdir -p "$(dirname "$outfile")"
@@ -541,7 +555,33 @@ HEREDOC
 # then write at the end.
 AIDER_TMP="$(mktemp)"
 WINDSURF_TMP="$(mktemp)"
-trap 'rm -f "$AIDER_TMP" "$WINDSURF_TMP"' EXIT
+trap 'rm -f "$AIDER_TMP" "$WINDSURF_TMP" ${LOCALIZATION_INDEX:-}' EXIT
+
+# Validate once, then materialize a tab-separated index for Codex. The
+# validator supplies the canonical YAML description, including folded lines.
+prepare_localization_index() {
+  local resource="$SCRIPT_DIR/i18n/agent-metadata-zh-TW.json"
+  python3 "$SCRIPT_DIR/validate-localization.py" --repo-root "$REPO_ROOT" --resource "$resource" >/dev/null
+  LOCALIZATION_INDEX="$(mktemp)"
+  python3 - "$REPO_ROOT" "$resource" "$SCRIPT_DIR/validate-localization.py" > "$LOCALIZATION_INDEX" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.stdout.reconfigure(encoding="utf-8")
+root, resource, validator = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("agency_localization_validator", validator)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+canonical = module.canonical_agents(root)
+data = json.loads(resource.read_text(encoding="utf-8"))
+for slug, entry in data["agents"].items():
+    name, description = canonical[slug]
+    print("\t".join((slug, name, description, entry["name"], entry["description"])))
+PY
+}
 
 # Write Aider/Windsurf headers once
 cat > "$AIDER_TMP" <<'HEREDOC'
@@ -679,6 +719,7 @@ main() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --tool)     tool="${2:?'--tool requires a value'}"; shift 2 ;;
+      --locale)   LOCALE="${2:?'--locale requires a value'}"; shift 2 ;;
       --out)      OUT_DIR="${2:?'--out requires a value'}"; shift 2 ;;
       --parallel) use_parallel=true; shift ;;
       --jobs)     parallel_jobs="${2:?'--jobs requires a value'}"; shift 2 ;;
@@ -686,6 +727,14 @@ main() {
       *)          error "Unknown option: $1"; usage ;;
     esac
   done
+
+  if [[ "$LOCALE" != "en" && "$LOCALE" != "zh-TW" ]]; then
+    error "Unknown locale '$LOCALE'. Valid: en zh-TW"
+    exit 1
+  fi
+  if [[ "$LOCALE" == "zh-TW" && ( "$tool" == "codex" || "$tool" == "all" ) ]]; then
+    prepare_localization_index
+  fi
 
   local valid_tools=("antigravity" "gemini-cli" "opencode" "cursor" "aider" "windsurf" "openclaw" "qwen" "zcode" "kimi" "codex" "osaurus" "hermes" "vibe" "all")
   local valid=false
@@ -699,6 +748,7 @@ main() {
   echo "  Repo:   $REPO_ROOT"
   echo "  Output: $OUT_DIR"
   echo "  Tool:   $tool"
+  echo "  Locale: $LOCALE (Codex display metadata only)"
   echo "  Date:   $TODAY"
   if $use_parallel && [[ "$tool" == "all" ]]; then
     info "Parallel mode: output buffered so each tool's output stays together."
@@ -724,7 +774,8 @@ main() {
     export AGENCY_CONVERT_OUT_DIR="$parallel_out_dir"
     export AGENCY_CONVERT_SCRIPT="$SCRIPT_DIR/convert.sh"
     export AGENCY_CONVERT_OUT="$OUT_DIR"
-    printf '%s\n' "${parallel_tools[@]}" | xargs -P "$parallel_jobs" -I {} sh -c '"$AGENCY_CONVERT_SCRIPT" --tool "{}" --out "$AGENCY_CONVERT_OUT" > "$AGENCY_CONVERT_OUT_DIR/{}" 2>&1'
+    export AGENCY_CONVERT_LOCALE="$LOCALE"
+    printf '%s\n' "${parallel_tools[@]}" | xargs -P "$parallel_jobs" -I {} sh -c '"$AGENCY_CONVERT_SCRIPT" --tool "{}" --locale "$AGENCY_CONVERT_LOCALE" --out "$AGENCY_CONVERT_OUT" > "$AGENCY_CONVERT_OUT_DIR/{}" 2>&1'
     for t in "${parallel_tools[@]}"; do
       [[ -f "$parallel_out_dir/$t" ]] && cat "$parallel_out_dir/$t"
     done
